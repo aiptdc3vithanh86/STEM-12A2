@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <title>Giám sát tư thế — Khung theo cơ thể</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, Roboto, Arial; margin: 10px; }
+    .controls { margin-bottom: 10px; }
+    #camera { width: 100%; max-height: 60vh; border-radius: 8px; background: #000; display:block; }
+    #c { position:absolute; left:0; top:0; pointer-events:none; }
+    .video-wrap { position: relative; display:inline-block; width:100%; }
+    #status { margin-top: 6px; font-weight: bold; }
+    #debug { font-size: 13px; white-space: pre-wrap; background:#f4f4f4; padding:8px; border-radius:6px; margin-top:6px;}
+    button { padding:8px 12px; margin:6px 6px 0 0; border-radius:6px; cursor:pointer; }
+    #popup {
+     
+<audio id="voiceVN" preload="none">
+  <source src="voice.mp3" type="audio/mp3">
+</audio>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.21.0"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+
+<script>
+const params = {
+  headDropRatio: 0.10,
+  torsoAngleDeg: 14,
+  holdFrames: 100,
+  cooldownMs: 6000
+};
+
+let hold = 0;
+let lastAlert = 0;
+let frameBuffer = [];
+let detector = null;
+let running = false;
+
+const video = document.getElementById("camera");
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const debug = document.getElementById("debug");
+const statusEl = document.getElementById("status");
+const popup = document.getElementById("popup");
+const voiceEl = document.getElementById("voiceVN");
+const beepEl = document.getElementById("alertSound");
+
+document.getElementById("btnPerm").onclick = () => Notification.requestPermission();
+document.getElementById("btnTest").onclick = () => triggerAlert();
+
+document.getElementById("unlockAudio").onclick = async () => {
+  try {
+    voiceEl.preload = "auto";
+    await voiceEl.play();
+    voiceEl.pause(); voiceEl.currentTime = 0;
+
+    beepEl.preload = "auto";
+    await beepEl.play().catch(()=>{});
+    beepEl.pause(); beepEl.currentTime = 0;
+
+    document.getElementById("unlockAudio").style.display = "none";
+    alert("Âm thanh đã được kích hoạt.");
+  } catch (e) {
+    alert("Không thể kích hoạt âm thanh: " + e.message);
+  }
+};
+
+document.getElementById("startCam").onclick = async () => {
+  try {
+    await startCamera();
+    document.getElementById("startCam").style.display = "none";
+    await loadDetector();
+    running = true;
+    statusEl.innerText = "Sẵn sàng ✔";
+    loop();
+  } catch (e) {
+    alert("Lỗi bật camera: " + e.message);
+  }
+};
+
+function playVoice(){ try{ voiceEl.currentTime=0; voiceEl.play(); }catch(e){} }
+function playBeep(){ try{ beepEl.currentTime=0; beepEl.play(); if(navigator.vibrate) navigator.vibrate([200,100,200]); }catch(e){} }
+
+function showPopup(){
+  popup.style.display="block";
+  setTimeout(()=>popup.style.display="none",2000);
+}
+
+function triggerAlert(){
+  const now = Date.now();
+  if(now - lastAlert < params.cooldownMs) return;
+  lastAlert = now;
+
+  playBeep();
+  playVoice();
+
+  if(Notification.permission==="granted"){
+    const n = new Notification("Cảnh báo tư thế",{ body:"Bạn đang ngồi sai tư thế!" });
+    setTimeout(()=>n.close(),2000);
+  } else showPopup();
+}
+
+async function startCamera(){
+  const stream = await navigator.mediaDevices.getUserMedia({ video:{facingMode:"user"} });
+  video.srcObject = stream;
+  await video.play();
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+}
+
+function mid(a,b){ return {x:(a.x+b.x)/2, y:(a.y+b.y)/2}; }
+function angle(a,b){
+  const dx = a.x - b.x, dy = a.y - b.y;
+  return Math.abs(Math.atan2(dx,dy)*180/Math.PI);
+}
+function avg(arr){
+  const s = arr.reduce((o,b)=>({nose:o.nose+b.nose, sh:o.sh+b.sh, ang:o.ang+b.ang}),{nose:0,sh:0,ang:0});
+  const n = arr.length || 1;
+  return { nose:s.nose/n, sh:s.sh/n, ang:s.ang/n };
+}
+
+async function loadDetector(){
+  if(detector) return;
+  detector = await poseDetection.createDetector(
+    poseDetection.SupportedModels.MoveNet,
+    { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
+  );
+}
+
+async function loop(){
+  if(!running) return;
+ const boxH = maxY - minY;
+
+        // ===== VẼ KHUNG THEO CƠ THỂ =====
+        const sh = mid(kp.left_shoulder, kp.right_shoulder);
+        const hip = mid(kp.left_hip, kp.right_hip);
+
+        frameBuffer.push({nose:kp.nose.y, sh:sh.y, ang:angle(hip,sh)});
+        if(frameBuffer.length>6) frameBuffer.shift();
+
+        const s = avg(frameBuffer);
+        const headDropRatio = (s.nose - s.sh)/canvas.height;
+        const bad = (headDropRatio > params.headDropRatio) || (s.ang > params.torsoAngleDeg);
+
+        ctx.lineWidth = 5;
+        ctx.strokeStyle = bad ? "red" : "lime";
+        ctx.strokeRect(minX, minY, boxW, boxH);
+
+        // Vẽ đường vai→hông
+        ctx.beginPath();
+        ctx.moveTo(sh.x, sh.y);
+        ctx.lineTo(hip.x, hip.y);
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = bad ? "red" : "lime";
+        ctx.stroke();
+
+        debug.textContent =
+          "headDropRatio: " + headDropRatio.toFixed(3) + "\n" +
+          "torsoAngle: " + s.ang.toFixed(2) + "\n" +
+          "hold: " + hold;
+
+        if(bad){
+          hold++;
+          if(hold >= params.holdFrames){
+            statusEl.innerText="⚠ Sai tư thế!";
+            triggerAlert();
+          }
+        } else {
+          hold = 0;
+          statusEl.innerText="✔ Tư thế đúng";
+        }
+      }
+    }
+  } catch(e){
+    console.warn("Loop error:",e);
+  }
+
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
