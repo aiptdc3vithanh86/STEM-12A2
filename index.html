@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <title>Nhận diện bệnh lúa</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      background: #f4f4f4;
+    }
+    #camera-container {
+      width: 300px;
+      height: 300px;
+      margin: 10px auto;
+      border: 3px solid #000;
+      border-radius: 12px;
+      overflow: hidden;
+      background: #000;
+    }
+    #result {
+      margin-top: 12px;
+      font-size: 20px;
+      font-weight: bold;
+      min-height: 90px;
+    }
+    button {
+      padding: 10px 16px;
+      font-size: 16px;
+      margin: 5px;
+    }
+    #camStatus {
+      margin-top: 6px;
+      font-style: italic;
+    }
+    #photo img {
+      width: 300px;
+      margin-top: 10px;
+      border: 2px solid #444;
+      border-radius: 8px;
+    }
+  </style>
+</head>
+
+<body>
+
+<h2>📷 Nhận diện bệnh lúa</h2>
+
+<button onclick="startCamera()">Bật camera</button>
+<button onclick="switchCamera()">Đổi camera</button>
+<br>
+<button onclick="startScan()">▶ Quét</button>
+<button onclick="stopScan()">⏸ Dừng</button>
+
+<div id="camStatus"></div>
+<div id="camera-container"></div>
+<div id="result"></div>
+<div id="photo"></div>
+
+<script>
+  const URL = "./model/";
+
+  let model, webcam;
+  let currentFacing = "environment";
+  let scanning = false;
+
+  async function loadModel() {
+    model = await tmImage.load(
+      URL + "model.json",
+      URL + "metadata.json"
+    );
+  }
+
+  async function getBestCameraFacing() {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d => d.kind === "videoinput");
+    for (let c of cams) {
+      const name = c.label.toLowerCase();
+      if (name.includes("back") || name.includes("rear") || name.includes("environment")) {
+        return "environment";
+      }
+    }
+    return "user";
+  }
+
+  async function startCamera() {
+    if (!model) await loadModel();
+    if (webcam) await webcam.stop();
+
+    currentFacing = await getBestCameraFacing();
+    webcam = new tmImage.Webcam(300, 300, false);
+
+    await webcam.setup({
+      facingMode: { exact: currentFacing }
+    }).catch(async () => {
+      currentFacing = "user";
+      await webcam.setup({ facingMode: "user" });
+    });
+
+    await webcam.play();
+
+    document.getElementById("camera-container").innerHTML = "";
+    document.getElementById("camera-container").appendChild(webcam.canvas);
+
+    document.getElementById("camStatus").innerText =
+      currentFacing === "environment"
+        ? "📷 Camera sau đang hoạt động"
+        : "📷 Camera trước đang hoạt động";
+
+    window.requestAnimationFrame(loop);
+  }
+
+  async function switchCamera() {
+    currentFacing = currentFacing === "environment" ? "user" : "environment";
+    await startCamera();
+  }
+
+  function startScan() {
+    scanning = true;
+  }
+
+  function stopScan() {
+    scanning = false;
+    captureFrame(); // ⬅️ bấm DỪNG là chụp luôn
+  }
+
+  async function loop() {
+    webcam.update();
+    if (scanning) await predict();
+    window.requestAnimationFrame(loop);
+  }
+
+  async function predict() {
+    const prediction = await model.predict(webcam.canvas);
+
+    let bestClass = "";
+    let bestProb = 0;
+
+    for (let i = 0; i < prediction.length; i++) {
+      if (prediction[i].probability > bestProb) {
+        bestProb = prediction[i].probability;
+        bestClass = prediction[i].className;
+      }
+    }
+
+    const percent = (bestProb * 100).toFixed(1);
+    let text = "";
+
+    if (bestProb >= 0.99) {
+      if (bestClass === "dao_on") {
+        text =
+          "🔴 <b>MẮC BỆNH ĐẠO ÔN</b><br>" +
+          "Độ tin cậy: " + percent + "%<br>" +
+          "👉 Điều trị: Cắt bỏ lá bệnh, phun thuốc đặc trị đạo ôn.";
+      }
+      else if (bestClass === "vang") {
+        text =
+          "🔴 <b>MẮC BỆNH VÀNG LÁ</b><br>" +
+          "Độ tin cậy: " + percent + "%<br>" +
+          "👉 Điều trị: Bổ sung kali, trung vi lượng.";
+      }
+      else {
+        text = "🟢 <b>LÚA KHỎE</b><br>Độ tin cậy: " + percent + "%";
+      }
+    }
+    else if (bestProb >= 0.9) {
+      text =
+        "🟠 <b>NGUY CƠ " + bestClass.toUpperCase() + "</b><br>" +
+        "Độ tin cậy: " + percent + "%<br>" +
+        "👉 Khuyến cáo: Thường xuyên thăm đồng.";
+    }
+    else {
+      text = "❓ <b>CHƯA PHÁT HIỆN BỆNH</b>";
+    }
+
+    document.getElementById("result").innerHTML = text;
+  }
+
+  // 📸 CHỤP KHUNG ẢNH KHI BẤM DỪNG
+  function captureFrame() {
+    if (!webcam) return;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = webcam.canvas.width;
+    canvas.height = webcam.canvas.height;
+
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(webcam.canvas, 0, 0);
+
+    const imgData = canvas.toDataURL("image/png");
+
+    document.getElementById("photo").innerHTML = `
+      <h3>📸 Ảnh tại thời điểm dừng</h3>
+      <img src="${imgData}">
+      <br>
+      <a href="${imgData}" download="anh_nhan_dien.png">
+        <button>⬇ Tải ảnh</button>
+      </a>
+    `;
+  }
+</script>
+
+</body>
+</html>
